@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Monthly Failure Types{% endblock %}
+{% block page_title %}Monthly Failure Types{% endblock %}
+
+{% block content %}
+<section class="result-header">
+    <div>
+        <a class="back-link" href="{{ url_for('index') }}">Back to dashboard</a>
+        <p>{{ failure_reason_chart.date_range }}</p>
+    </div>
+</section>
+
+<section class="table-section chart-page-panel">
+    <div class="section-heading">
+        <div>
+            <h2>Failure type</h2>
+            <p>{{ failure_reason_chart.date_range }}</p>
+        </div>
+    </div>
+
+    {% if failure_reason_chart.reasons %}
+        {% set chart_variant = "large" %}
+        {% include "failure_chart.html" %}
+    {% else %}
+        <p class="empty">No failure reasons found in the last month.</p>
+    {% endif %}
+</section>
+
+<section class="table-section">
+    <div class="section-heading">
+        <div>
+            <h2>Results</h2>
+            <p>Count for each failure reason by date.</p>
+        </div>
+    </div>
+
+    {% include "failure_counts.html" %}
+</section>
+{% endblock %}

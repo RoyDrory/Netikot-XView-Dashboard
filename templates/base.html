@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Netikot Dashboard{% endblock %}</title>
+    <script>
+        (function () {
+            var theme = "light";
+            try {
+                theme = localStorage.getItem("netikot-theme") || theme;
+            } catch (error) {}
+            document.documentElement.setAttribute("data-theme", theme);
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" aria-label="Dashboard navigation">
+            <a class="brand" href="{{ url_for('index') }}">
+                <span class="brand-mark"></span>
+                <span class="brand-copy">
+                    <span>Netikot Xview</span>
+                    <small>By Roy Drory</small>
+                </span>
+            </a>
+
+            <form class="sidebar-search" action="{{ url_for('search_ip') }}" method="get">
+                <input type="search" name="q" placeholder="Search for..." value="{{ request.args.get('q', request.args.get('ip', '')) }}">
+            </form>
+
+            <nav class="side-nav">
+                <a class="{{ 'active' if request.endpoint == 'index' else '' }}" href="{{ url_for('index') }}"><span></span>Dashboard</a>
+                <a class="{{ 'active' if request.endpoint in ['monthly_failure_types', 'failure_reasons'] else '' }}" href="{{ url_for('monthly_failure_types') }}"><span></span>Monthly failure types</a>
+                <a class="{{ 'active' if request.endpoint == 'latest_failures' else '' }}" href="{{ url_for('latest_failures') }}"><span></span>Latest failures</a>
+                <a class="{{ 'active' if request.endpoint == 'incorrect_passwords' else '' }}" href="{{ url_for('incorrect_passwords') }}"><span></span>Incorrect passwords</a>
+                <a class="{{ 'active' if request.endpoint == 'port_closed' else '' }}" href="{{ url_for('port_closed') }}"><span></span>Port is closed</a>
+                <a class="{{ 'active' if request.endpoint == 'ip_errors_since_success' else '' }}" href="{{ url_for('ip_errors_since_success') }}"><span></span>IP errors since success</a>
+                <a class="{{ 'active' if request.endpoint == 'site_summary' else '' }}" href="{{ url_for('site_summary') }}"><span></span>Site coverage</a>
+                <a class="{{ 'active' if request.endpoint == 'latest_successes' else '' }}" href="{{ url_for('latest_successes') }}"><span></span>Latest succeeded results</a>
+            </nav>
+
+            <div class="sidebar-section">
+                <a href="{{ url_for('index') }}"><span></span>Settings</a>
+            </div>
+
+            <div class="sidebar-user">
+                <div class="avatar">N</div>
+                <div>
+                    <strong>Netikot</strong>
+                    <span>SQLite monitor</span>
+                </div>
+            </div>
+        </aside>
+
+        <div class="main-shell">
+            <header class="topbar">
+                <div>
+                    <p class="eyebrow">Analytics</p>
+                    <h1>{% block page_title %}Dashboard{% endblock %}</h1>
+                </div>
+
+                <div class="topbar-actions">
+                    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch theme">
+                        <span class="theme-icon" aria-hidden="true"></span>
+                    </button>
+                    <form class="search-form" action="{{ url_for('search_ip') }}" method="get">
+                        <input type="search" name="q" placeholder="Search IP, site, details" value="{{ request.args.get('q', request.args.get('ip', '')) }}">
+                        <button type="submit">Search</button>
+                    </form>
+                    <a class="report-button" href="{{ url_for('download_report') }}" aria-label="Get Report" download>
+                        <span class="report-icon" aria-hidden="true">
+                            <svg viewBox="0 0 64 64" focusable="false">
+                                <defs>
+                                    <linearGradient id="report-download-gradient" x1="13" y1="58" x2="51" y2="6" gradientUnits="userSpaceOnUse">
+                                        <stop stop-color="#20d5ff"></stop>
+                                        <stop offset="1" stop-color="#cb3dff"></stop>
+                                    </linearGradient>
+                                    <linearGradient id="report-download-gradient-light" x1="13" y1="58" x2="51" y2="6" gradientUnits="userSpaceOnUse">
+                                        <stop stop-color="#315be8"></stop>
+                                        <stop offset="1" stop-color="#20d5ff"></stop>
+                                    </linearGradient>
+                                </defs>
+                                <circle class="report-download-ring" cx="32" cy="32" r="29.5"></circle>
+                                <g class="report-download-mark" transform="translate(4.48 4.48) scale(0.86)">
+                                    <path d="M32 14v28"></path>
+                                    <path d="m20 31 12 12 12-12"></path>
+                                    <path d="M18 51h28"></path>
+                                </g>
+                            </svg>
+                        </span>
+                    </a>
+                </div>
+            </header>
+
+            <main class="page">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+    <script>
+        (function () {
+            var toggle = document.getElementById("theme-toggle");
+            if (!toggle) {
+                return;
+            }
+
+            function setTheme(theme) {
+                document.documentElement.setAttribute("data-theme", theme);
+                try {
+                    localStorage.setItem("netikot-theme", theme);
+                } catch (error) {}
+                toggle.setAttribute("aria-label", theme === "light" ? "Switch to dark mode" : "Switch to light mode");
+            }
+
+            setTheme(document.documentElement.getAttribute("data-theme") || "light");
+            toggle.addEventListener("click", function () {
+                var current = document.documentElement.getAttribute("data-theme") || "light";
+                setTheme(current === "light" ? "dark" : "light");
+            });
+        })();
+
+        (function () {
+            var yTop = 12;
+            var yBottom = 86;
+            var yHeight = yBottom - yTop;
+
+            function formatChartLabel(value) {
+                if (Math.abs(value - Math.round(value)) < 0.01) {
+                    return String(Math.round(value));
+                }
+                return value.toFixed(1);
+            }
+
+            function niceChartMax(value) {
+                if (value <= 1) {
+                    return 1;
+                }
+
+                var power = Math.pow(10, Math.floor(Math.log10(value)));
+                var normalized = value / power;
+                var rounded = 10;
+
+                if (normalized <= 1) {
+                    rounded = 1;
+                } else if (normalized <= 2) {
+                    rounded = 2;
+                } else if (normalized <= 5) {
+                    rounded = 5;
+                }
+
+                return rounded * power;
+            }
+
+            function updateFailureChartScale(chart, activeSeries) {
+                var buttons = Array.prototype.slice.call(chart.querySelectorAll(".failure-legend-toggle"));
+                var isShowingAll = activeSeries.length === buttons.length;
+                var defaultMax = Number(chart.getAttribute("data-default-max")) || 1;
+                var maxValue = 0;
+
+                activeSeries.forEach(function (series) {
+                    chart.querySelectorAll('.failure-line-plot [data-series="' + series + '"][data-value]').forEach(function (element) {
+                        maxValue = Math.max(maxValue, Number(element.getAttribute("data-value")) || 0);
+                    });
+                });
+
+                var chartMax = isShowingAll ? defaultMax : niceChartMax(maxValue);
+                chartMax = Math.max(chartMax, 1);
+
+                chart.querySelectorAll(".failure-y-labels span").forEach(function (label, index) {
+                    label.textContent = formatChartLabel(chartMax * (4 - index) / 4);
+                });
+
+                buttons.forEach(function (legendButton) {
+                    var buttonSeries = legendButton.getAttribute("data-series");
+                    var points = [];
+
+                    chart.querySelectorAll('.failure-line-plot [data-series="' + buttonSeries + '"][data-value]').forEach(function (element) {
+                        var value = Number(element.getAttribute("data-value")) || 0;
+                        var x = Number(element.getAttribute("data-x")) || 0;
+                        var y = yBottom - (yHeight * value / chartMax);
+                        y = Math.max(yTop, Math.min(yBottom, y));
+
+                        element.style.top = y.toFixed(2) + "%";
+                        points.push(x.toFixed(2) + "," + y.toFixed(2));
+                    });
+
+                    var line = chart.querySelector('.failure-line-plot svg [data-series="' + buttonSeries + '"]');
+                    if (line) {
+                        line.setAttribute("points", points.join(" "));
+                    }
+                });
+            }
+
+            document.addEventListener("click", function (event) {
+                var button = event.target.closest(".failure-legend-toggle");
+                if (!button) {
+                    return;
+                }
+
+                var chart = button.closest(".failure-chart");
+                if (!chart) {
+                    return;
+                }
+
+                var series = button.getAttribute("data-series");
+                var buttons = Array.prototype.slice.call(chart.querySelectorAll(".failure-legend-toggle"));
+                var activeButtons = buttons.filter(function (legendButton) {
+                    return legendButton.getAttribute("aria-pressed") !== "false";
+                });
+                var isActive = button.getAttribute("aria-pressed") !== "false";
+                var nextActiveSeries;
+
+                if (activeButtons.length === buttons.length) {
+                    nextActiveSeries = [series];
+                } else if (isActive) {
+                    nextActiveSeries = activeButtons
+                        .map(function (legendButton) {
+                            return legendButton.getAttribute("data-series");
+                        })
+                        .filter(function (buttonSeries) {
+                            return buttonSeries !== series;
+                        });
+                } else {
+                    nextActiveSeries = activeButtons.map(function (legendButton) {
+                        return legendButton.getAttribute("data-series");
+                    });
+                    nextActiveSeries.push(series);
+                }
+
+                if (nextActiveSeries.length === 0) {
+                    nextActiveSeries = buttons.map(function (legendButton) {
+                        return legendButton.getAttribute("data-series");
+                    });
+                }
+
+                buttons.forEach(function (legendButton) {
+                    var buttonSeries = legendButton.getAttribute("data-series");
+                    var isVisible = nextActiveSeries.indexOf(buttonSeries) !== -1;
+
+                    legendButton.setAttribute("aria-pressed", isVisible ? "true" : "false");
+                    chart.querySelectorAll('.failure-line-plot [data-series="' + buttonSeries + '"]').forEach(function (element) {
+                        element.classList.toggle("is-hidden", !isVisible);
+                    });
+                });
+
+                updateFailureChartScale(chart, nextActiveSeries);
+            });
+        })();
+
+        (function () {
+            setTimeout(function () {
+                window.location.reload();
+            }, 5 * 60 * 1000);
+        })();
+    </script>
+</body>
+</html>

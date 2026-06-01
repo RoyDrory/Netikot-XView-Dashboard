@@ -1,0 +1,24 @@
+{% if rows %}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                {% for column in rows[0].keys() %}
+                <th>{{ column }}</th>
+                {% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                {% for value in row %}
+                <td class="mixed-text">{{ value if value is not none else "" }}</td>
+                {% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<p class="empty">No rows found.</p>
+{% endif %}

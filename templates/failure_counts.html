@@ -1,0 +1,23 @@
+{% if grouped_counts %}
+<div class="count-results">
+    {% for day_group in grouped_counts %}
+    <section class="date-group">
+        <div class="date-group-header">
+            <h3>{{ day_group.day }}</h3>
+            <span>{{ day_group.total }} failures</span>
+        </div>
+
+        <div class="count-list">
+            {% for reason in day_group.reasons %}
+            <div class="count-row">
+                <span class="mixed-text">{{ reason.reason }}</span>
+                <strong>{{ reason.amount }}</strong>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endfor %}
+</div>
+{% else %}
+<p class="empty">No rows found.</p>
+{% endif %}

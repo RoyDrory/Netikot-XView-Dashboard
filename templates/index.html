@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+
+{% block title %}Netikot Dashboard{% endblock %}
+{% block page_title %}Analytics{% endblock %}
+
+{% block content %}
+<section class="metrics-grid" aria-label="Dashboard metrics">
+    <article class="metric-card">
+        <div class="metric-top">
+            <span class="metric-name"><i class="dot violet"></i>Total checks</span>
+            <span class="card-menu">...</span>
+        </div>
+        <div class="metric-value">{{ "{:,}".format(summary.total_checks or 0) }}</div>
+        <div class="metric-foot">
+            <span>DB storage: {{ db_size_label }}</span>
+            <span class="change up">Live DB</span>
+        </div>
+    </article>
+
+    <article class="metric-card">
+        <div class="metric-top">
+            <span class="metric-name"><i class="dot cyan"></i>Last Run</span>
+            <span class="card-menu">...</span>
+        </div>
+        <div class="metric-value">{{ "{:,}".format(last_run_card.total or 0) }}</div>
+        <div class="metric-foot">
+            <span>{{ last_run_card.run_date or "No run date" }}</span>
+            <span class="change {{ 'up' if last_run_card.run_date == today_date else 'down' }}">Applied</span>
+        </div>
+    </article>
+
+    <article class="metric-card">
+        <div class="metric-top">
+            <span class="metric-name"><i class="dot green"></i>Run successes</span>
+            <span class="card-menu">...</span>
+        </div>
+        <div class="metric-value">{{ "{:,}".format(last_success_card.total or 0) }}</div>
+        <div class="metric-foot">
+            <span>Success rate:</span>
+            <span class="change up">{{ "%.1f"|format(last_success_card.rate or 0) }}%</span>
+        </div>
+    </article>
+
+    <article class="metric-card">
+        <div class="metric-top">
+            <span class="metric-name"><i class="dot red"></i>Run failures</span>
+            <span class="card-menu">...</span>
+        </div>
+        <div class="metric-value">{{ "{:,}".format(last_failed_card.total or 0) }}</div>
+        <div class="metric-foot">
+            <span>Failure rate:</span>
+            <span class="change down">{{ "%.1f"|format(last_failed_card.rate or 0) }}%</span>
+        </div>
+    </article>
+</section>
+
+<section class="dashboard-grid">
+    <article class="panel chart-panel">
+        <div class="panel-header">
+            <div>
+                <h2>Monthly failure types</h2>
+                <p>{{ failure_reason_chart.date_range }}</p>
+            </div>
+            <a class="panel-link" href="{{ url_for('monthly_failure_types') }}">View more</a>
+        </div>
+
+        {% if failure_reason_chart.reasons %}
+        {% set chart_variant = "compact" %}
+        {% include "failure_chart.html" %}
+        {% else %}
+            <p class="empty">No failure reasons found in the last month.</p>
+        {% endif %}
+    </article>
+
+    <article class="panel meter-panel">
+        <div class="panel-header">
+            <div>
+                <h2>Current Status</h2>
+                <p>Latest results</p>
+            </div>
+            <span class="card-menu">...</span>
+        </div>
+
+        <div class="radial-wrap">
+            <div class="radial" style="--value: {{ target_summary.healthy_rate or 0 }}%;">
+                <div>
+                    <strong>{{ "%.0f"|format(target_summary.healthy_rate or 0) }}%</strong>
+                    <span>healthy</span>
+                </div>
+            </div>
+        </div>
+
+        <dl class="legend-list">
+            <div><dt><i class="dot green"></i>Succeeded</dt><dd>{{ target_summary.healthy_targets or 0 }}</dd></div>
+            <div><dt><i class="dot red"></i>Failed</dt><dd>{{ target_summary.failing_targets or 0 }}</dd></div>
+        </dl>
+    </article>
+
+    <article class="panel line-panel">
+        <div class="panel-header">
+            <div>
+                <h2>Top failure types from last results</h2>
+                <p>Most common latest failed Details values</p>
+            </div>
+            <a class="panel-link" href="{{ url_for('latest_failures') }}">View more</a>
+        </div>
+
+        <div class="reason-list">
+            {% for row in top_failure_details %}
+            <div class="reason-row">
+                <span class="reason-label mixed-text">{{ row.detail }}</span>
+                <span class="reason-bar"><i style="width: {{ ((row.amount or 0) / max_failure_amount * 100)|round(1) }}%"></i></span>
+                <strong>{{ row.amount }}</strong>
+            </div>
+            {% else %}
+            <p class="empty">No failed checks found.</p>
+            {% endfor %}
+        </div>
+    </article>
+</section>
+
+<section class="table-section">
+    <div class="section-heading">
+        <div>
+            <h2>Incorrect passwords</h2>
+            <p>Latest targets with password errors</p>
+        </div>
+        <a href="{{ url_for('incorrect_passwords') }}">View more</a>
+    </div>
+
+    {% with rows=incorrect_passwords %}
+        {% include "table.html" %}
+    {% endwith %}
+</section>
+
+<section class="table-section">
+    <div class="section-heading">
+        <div>
+            <h2>Port is closed</h2>
+            <p>Latest targets with closed ports</p>
+        </div>
+        <a href="{{ url_for('port_closed') }}">View more</a>
+    </div>
+
+    {% with rows=port_closed_rows %}
+        {% include "table.html" %}
+    {% endwith %}
+</section>
+
+<section class="lower-grid">
+    <article class="table-section wide-card">
+        <div class="section-heading">
+            <div>
+                <h2>Most errors per IP since last success</h2>
+                <p>Failure count after each IP last succeeded</p>
+            </div>
+            <a href="{{ url_for('ip_errors_since_success') }}">View more</a>
+        </div>
+
+        {% with chart_rows=ip_error_chart_rows, chart_y_ticks=ip_error_chart_y_ticks %}
+            {% include "ip_error_column_chart.html" %}
+        {% endwith %}
+        <div class="card-table-gap">
+            {% with rows=ip_error_rows %}
+                {% include "table.html" %}
+            {% endwith %}
+        </div>
+    </article>
+
+    <article class="table-section">
+        <div class="section-heading">
+            <div>
+                <h2>Site coverage mapping</h2>
+                <p>Grouped by site name from latest results</p>
+            </div>
+            <a href="{{ url_for('site_summary') }}">View more</a>
+        </div>
+
+        {% with rows=site_rows %}
+            {% include "table.html" %}
+        {% endwith %}
+    </article>
+
+    <article class="table-section">
+        <div class="section-heading">
+            <div>
+                <h2>Latest succeeded results</h2>
+                <p>Latest successful rows from last results</p>
+            </div>
+            <a href="{{ url_for('latest_successes') }}">View more</a>
+        </div>
+
+        {% with rows=latest_success_rows %}
+            {% include "table.html" %}
+        {% endwith %}
+    </article>
+</section>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block page_title %}{{ title }}{% endblock %}
+
+{% block content %}
+<section class="result-header">
+    <div>
+        <a class="back-link" href="{{ url_for('index') }}">Back to dashboard</a>
+        {% if description %}<p>{{ description }}</p>{% endif %}
+    </div>
+
+    <div class="result-count">
+        <strong>{{ rows|length }}</strong>
+        <span>rows shown{% if rows|length == row_limit %} (limit reached){% endif %}</span>
+    </div>
+</section>
+
+<section class="table-section result-table">
+    {% include "table.html" %}
+</section>
+{% endblock %}

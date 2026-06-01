@@ -1,0 +1,66 @@
+<div class="failure-chart {{ chart_variant|default('') }}" data-default-max="{{ failure_reason_chart.y_labels[0] if failure_reason_chart.y_labels else 1 }}" aria-label="Failure reasons by date">
+    <div class="failure-line-layout">
+        <div class="failure-y-labels">
+            {% for label in failure_reason_chart.y_labels %}
+            <span>{{ label }}</span>
+            {% endfor %}
+        </div>
+
+        <div>
+            <div class="failure-line-plot">
+                <svg class="failure-line-svg" viewBox="0 0 100 100" preserveAspectRatio="none" role="img">
+                    <title>Failure reasons line graph</title>
+                    <g class="chart-grid">
+                        <line x1="6" x2="94" y1="12" y2="12"></line>
+                        <line x1="6" x2="94" y1="30.5" y2="30.5"></line>
+                        <line x1="6" x2="94" y1="49" y2="49"></line>
+                        <line x1="6" x2="94" y1="67.5" y2="67.5"></line>
+                        <line x1="6" x2="94" y1="86" y2="86"></line>
+                    </g>
+                    {% if failure_reason_chart.total_series %}
+                    <polyline class="failure-total-line" data-series="total" points="{{ failure_reason_chart.total_series.points }}"></polyline>
+                    {% endif %}
+                    {% for series in failure_reason_chart.series %}
+                    <polyline class="failure-series-line failure-series-{{ loop.index0 % 8 }}" data-series="series-{{ loop.index0 }}" points="{{ series.points }}"></polyline>
+                    {% endfor %}
+                </svg>
+
+                {% if failure_reason_chart.total_series %}
+                    {% for point in failure_reason_chart.total_series.dots %}
+                    <span class="failure-total-dot {{ 'is-zero' if point.amount == 0 else '' }}" data-series="total" data-x="{{ point.x }}" data-value="{{ point.amount }}" style="left: {{ point.x }}%; top: {{ point.y }}%;" title="{{ point.day }} - Total failures: {{ point.amount }}" aria-label="{{ point.amount }} total failures"></span>
+                    {% endfor %}
+                {% endif %}
+                {% for series in failure_reason_chart.series %}
+                    {% set series_class = 'failure-series-' ~ (loop.index0 % 8) %}
+                    {% set series_id = 'series-' ~ loop.index0 %}
+                    {% for point in series.dots %}
+                    <span class="failure-line-dot {{ series_class }} {{ 'is-zero' if point.amount == 0 else '' }}" data-series="{{ series_id }}" data-x="{{ point.x }}" data-value="{{ point.amount }}" style="left: {{ point.x }}%; top: {{ point.y }}%;" title="{{ point.day }} - {{ series.reason }}: {{ point.amount }}" aria-label="{{ point.amount }} failures"></span>
+                    {% endfor %}
+                {% endfor %}
+            </div>
+
+            <div class="failure-line-labels" style="--failure-day-count: {{ failure_reason_chart.labels|length }};">
+                {% for label in failure_reason_chart.labels %}
+                <span>{{ label }}</span>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <div class="failure-line-legend">
+        {% if failure_reason_chart.total_series %}
+        {% if chart_variant|default('') == "compact" %}
+        <span class="failure-legend-label"><i class="failure-legend-dot failure-total-dot-swatch"></i>Total failures</span>
+        {% else %}
+        <button class="failure-legend-toggle" type="button" data-series="total" aria-pressed="true"><i class="failure-legend-dot failure-total-dot-swatch"></i>Total failures</button>
+        {% endif %}
+        {% endif %}
+        {% for series in failure_reason_chart.series %}
+        {% if chart_variant|default('') == "compact" %}
+        <span class="failure-legend-label mixed-text" title="{{ series.reason }}"><i class="failure-legend-dot failure-series-{{ loop.index0 % 8 }}"></i>{{ series.reason }}</span>
+        {% else %}
+        <button class="failure-legend-toggle mixed-text" type="button" data-series="series-{{ loop.index0 }}" aria-pressed="true" title="{{ series.reason }}"><i class="failure-legend-dot failure-series-{{ loop.index0 % 8 }}"></i>{{ series.reason }}</button>
+        {% endif %}
+        {% endfor %}
+    </div>
+</div>

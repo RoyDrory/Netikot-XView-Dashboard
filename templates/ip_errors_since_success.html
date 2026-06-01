@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+{% block page_title %}{{ title }}{% endblock %}
+
+{% block content %}
+<section class="result-header">
+    <div>
+        <a class="back-link" href="{{ url_for('index') }}">Back to dashboard</a>
+        <p>{{ description }}</p>
+    </div>
+
+    <div class="result-count">
+        <strong>{{ rows|length }}</strong>
+        <span>rows shown{% if rows|length == row_limit %} (limit reached){% endif %}</span>
+    </div>
+</section>
+
+<section class="table-section ip-error-chart-card">
+    <div class="section-heading">
+        <div>
+            <h2>IPs by failed result count</h2>
+            <p>Amount of IPs for each consecutive failure count</p>
+        </div>
+    </div>
+
+    {% include "ip_error_column_chart.html" %}
+</section>
+
+<section class="table-section">
+    {% include "table.html" %}
+</section>
+{% endblock %}

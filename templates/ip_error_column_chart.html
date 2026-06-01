@@ -1,0 +1,22 @@
+{% if chart_rows %}
+<div class="ip-error-column-chart" aria-label="Amount of IPs by failed result count">
+    <div class="ip-error-y-ticks">
+        {% for tick in chart_y_ticks %}
+        <span class="ip-error-y-tick" style="bottom: {{ tick.position }}%;">
+            <i></i>{{ tick.value }}
+        </span>
+        {% endfor %}
+    </div>
+    <div class="ip-error-bars" style="--bar-count: {{ chart_rows|length }};">
+        {% for bar in chart_rows %}
+        <div class="ip-error-bar-item" title="{{ bar.ip_count }} IPs with {{ bar.errors }} failed results">
+            <span class="ip-error-bar-fill" style="height: {{ bar.height }}%;"></span>
+            <span class="ip-error-bar-label">{{ bar.errors }}</span>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+<p class="ip-error-axis-label">Failed results</p>
+{% else %}
+<p class="empty">No failed IPs found.</p>
+{% endif %}
