@@ -1,9 +1,9 @@
 from pathlib import Path
+import os
 import sqlite3
-import time
 from datetime import datetime
 from io import BytesIO
-from threading import Lock
+from threading import Event, Lock, Thread
 
 from flask import Flask, Response, render_template, request
 from openpyxl import Workbook
@@ -18,56 +18,96 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-DB_PATH = Path("/data/NetikotDB.db")
+DB_PATH = Path(os.environ.get("NETIKOT_DB_PATH", "/data/NetikotDB.db"))
 DB_URI = f"file:{DB_PATH.as_posix()}?mode=ro&immutable=1"
 ROW_LIMIT = 500
-DASHBOARD_CACHE_TTL_SECONDS = 5 * 60
+PAGE_CACHE_REFRESH_SECONDS = 10 * 60
 
 app = Flask(__name__)
 
-_dashboard_cache = {
-    "expires_at": 0,
-    "html": None,
-}
-_dashboard_cache_lock = Lock()
+_page_cache = {}
+_page_cache_lock = Lock()
+_page_cache_refresh_lock = Lock()
+_page_cache_stop = Event()
+_page_cache_refresher_started = False
 
-LATEST_RUN_CTE = """
-WITH latest_run AS (
+CURRENT_TARGET_IPS_CTE = """
+WITH latest_data_day AS (
+    SELECT date(MAX("Date")) AS day
+    FROM tbl_Results
+),
+ordered_results AS (
+    SELECT
+        results.*,
+        LAG(datetime("Date")) OVER (ORDER BY datetime("Date"), ID) AS previous_date
+    FROM tbl_Results AS results
+    JOIN latest_data_day ON date(results."Date") = latest_data_day.day
+),
+run_starts AS (
+    SELECT ID, "Date"
+    FROM ordered_results
+    WHERE previous_date IS NULL
+        OR (julianday("Date") - julianday(previous_date)) * 24 * 60 >= 30
+),
+first_day_run AS (
+    SELECT
+        run_starts.ID AS start_id,
+        COALESCE(
+            (
+                SELECT MIN(next_start.ID)
+                FROM run_starts AS next_start
+                WHERE next_start.ID > run_starts.ID
+            ),
+            (SELECT COALESCE(MAX(ID), 0) + 1 FROM ordered_results)
+        ) AS end_id
+    FROM run_starts
+    ORDER BY run_starts.ID
+    LIMIT 1
+),
+current_target_ips AS (
+    SELECT DISTINCT results.IP_Address
+    FROM ordered_results AS results
+    JOIN first_day_run
+        ON results.ID >= first_day_run.start_id
+        AND results.ID < first_day_run.end_id
+)
+"""
+
+LATEST_RUN_CTE = CURRENT_TARGET_IPS_CTE + """
+,
+latest_run AS (
     SELECT results.*
     FROM tbl_Results AS results
+    JOIN current_target_ips AS target
+        ON target.IP_Address = results.IP_Address
     JOIN (
-        SELECT IP_Address, MAX("Date") AS latest_date
-        FROM tbl_Results
-        GROUP BY IP_Address
+        SELECT results.IP_Address, MAX("Date") AS latest_date
+        FROM tbl_Results AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address
+        GROUP BY results.IP_Address
     ) AS latest
         ON latest.IP_Address = results.IP_Address
         AND latest.latest_date = results."Date"
 )
 """
 
-LAST_EXECUTION_CTE = """
-WITH ordered_results AS (
-    SELECT
-        results.*,
-        LAG(datetime("Date")) OVER (ORDER BY datetime("Date"), ID) AS previous_date
-    FROM tbl_Results AS results
-),
-run_starts AS (
-    SELECT ID
-    FROM ordered_results
-    WHERE previous_date IS NULL
-        OR (julianday("Date") - julianday(previous_date)) * 24 * 60 >= 30
-),
+LAST_EXECUTION_CTE = CURRENT_TARGET_IPS_CTE + """
+,
 last_execution AS (
     SELECT results.*
     FROM tbl_Results AS results
+    JOIN current_target_ips AS target
+        ON target.IP_Address = results.IP_Address
     WHERE results.ID >= (SELECT MAX(ID) FROM run_starts)
 )
 """
 
 FAILURE_TYPE_EXPR = """
 CASE
-    WHEN LOWER(TRIM(COALESCE(Details, ''))) LIKE '%connection aborted%' THEN 'Connection aborted'
+    WHEN LOWER(TRIM(COALESCE(Details, ''))) LIKE '%connection aborted%'
+        OR LOWER(TRIM(COALESCE(Details, ''))) LIKE '%no connection could be made because the target machine actively refused it%'
+    THEN 'Connection aborted'
     WHEN LOWER(TRIM(COALESCE(Details, ''))) LIKE '%timeout%' THEN 'timeout'
     ELSE COALESCE(NULLIF(TRIM(Details), ''), 'No details')
 END
@@ -100,15 +140,103 @@ def query_all_with_fallback(query, fallback_query, params=()):
         return query_all(fallback_query, params)
 
 
-def get_cached_dashboard_html():
-    if _dashboard_cache["html"] and time.monotonic() < _dashboard_cache["expires_at"]:
-        return _dashboard_cache["html"]
-    return None
+def get_cached_page(cache_key):
+    with _page_cache_lock:
+        return _page_cache.get(cache_key)
 
 
-def set_cached_dashboard_html(html):
-    _dashboard_cache["html"] = html
-    _dashboard_cache["expires_at"] = time.monotonic() + DASHBOARD_CACHE_TTL_SECONDS
+def set_cached_pages(cache_items):
+    with _page_cache_lock:
+        _page_cache.update(cache_items)
+
+
+def replace_cached_pages(cache_items):
+    with _page_cache_lock:
+        _page_cache.clear()
+        _page_cache.update(cache_items)
+
+
+def build_cache_item(cache_spec):
+    if cache_spec["type"] == "xlsx":
+        return {
+            "body": cache_spec["builder"](),
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+
+    with app.test_request_context(cache_spec["path"]):
+        return {
+            "body": cache_spec["builder"](),
+            "mimetype": "text/html",
+        }
+
+
+def refresh_page_cache():
+    if not _page_cache_refresh_lock.acquire(blocking=False):
+        return False
+
+    try:
+        new_cache = {}
+        for cache_spec in PAGE_CACHE_SPECS:
+            new_cache[cache_spec["key"]] = build_cache_item(cache_spec)
+        replace_cached_pages(new_cache)
+        app.logger.info("Page cache refreshed with %s pages.", len(new_cache))
+        return True
+    except Exception:
+        app.logger.exception("Page cache refresh failed; keeping previous cached pages.")
+        return False
+    finally:
+        _page_cache_refresh_lock.release()
+
+
+def page_cache_refresher():
+    while not _page_cache_stop.wait(PAGE_CACHE_REFRESH_SECONDS):
+        refresh_page_cache()
+
+
+def start_page_cache_refresher():
+    global _page_cache_refresher_started
+
+    if _page_cache_refresher_started:
+        return
+
+    refresh_page_cache()
+    Thread(target=page_cache_refresher, daemon=True, name="page-cache-refresher").start()
+    _page_cache_refresher_started = True
+
+
+def cached_html_response(cache_key, builder):
+    cached_page = get_cached_page(cache_key)
+    if cached_page is not None:
+        return Response(cached_page["body"], mimetype=cached_page["mimetype"])
+
+    body = builder()
+    set_cached_pages(
+        {
+            cache_key: {
+                "body": body,
+                "mimetype": "text/html",
+            }
+        }
+    )
+    return Response(body, mimetype="text/html")
+
+
+def cached_report_response():
+    cache_key = "/download_report"
+    cached_page = get_cached_page(cache_key)
+    if cached_page is None:
+        cached_page = {
+            "body": build_weekly_failure_types_xlsx(),
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+        set_cached_pages({cache_key: cached_page})
+
+    filename = f"weekly_report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
+    return Response(
+        cached_page["body"],
+        mimetype=cached_page["mimetype"],
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 def format_file_size(size_in_bytes):
@@ -237,16 +365,22 @@ def build_failure_reason_chart(days, rows):
 
 def get_failure_reason_days():
     return query_all_with_fallback(
-        """
-        SELECT DISTINCT date("Date") AS day
-        FROM vew_LastMonthRun
-        WHERE "Date" IS NOT NULL
+        CURRENT_TARGET_IPS_CTE
+        + """
+        SELECT DISTINCT date(results."Date") AS day
+        FROM vew_LastMonthRun AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address
+        WHERE results."Date" IS NOT NULL
         ORDER BY day;
         """,
-        """
-        SELECT DISTINCT date("Date") AS day
-        FROM tbl_Results
-        WHERE "Date" >= datetime((SELECT MAX("Date") FROM tbl_Results), '-30 days')
+        CURRENT_TARGET_IPS_CTE
+        + """
+        SELECT DISTINCT date(results."Date") AS day
+        FROM tbl_Results AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address
+        WHERE results."Date" >= datetime((SELECT MAX("Date") FROM tbl_Results), '-30 days')
         ORDER BY day;
         """,
     )
@@ -254,19 +388,23 @@ def get_failure_reason_days():
 
 def get_failure_reason_summary_rows():
     return query_all_with_fallback(
-        f"""
-        WITH ranked AS (
+        CURRENT_TARGET_IPS_CTE
+        + f"""
+        ,
+        ranked AS (
             SELECT
-                IP_Address,
-                Is_Success,
+                results.IP_Address,
+                results.Is_Success,
                 {FAILURE_TYPE_EXPR} AS reason,
-                date("Date") AS day,
+                date(results."Date") AS day,
                 ROW_NUMBER() OVER (
-                    PARTITION BY IP_Address, date("Date")
-                    ORDER BY datetime("Date") DESC
+                    PARTITION BY results.IP_Address, date(results."Date")
+                    ORDER BY datetime(results."Date") DESC
                 ) AS row_number
-            FROM vew_LastMonthRun
-            WHERE "Date" IS NOT NULL
+            FROM vew_LastMonthRun AS results
+            JOIN current_target_ips AS target
+                ON target.IP_Address = results.IP_Address
+            WHERE results."Date" IS NOT NULL
         )
         SELECT day, reason, COUNT(*) AS amount
         FROM ranked
@@ -274,19 +412,23 @@ def get_failure_reason_summary_rows():
         GROUP BY day, reason
         ORDER BY day, amount DESC, reason;
         """,
-        f"""
-        WITH ranked AS (
+        CURRENT_TARGET_IPS_CTE
+        + f"""
+        ,
+        ranked AS (
             SELECT
-                IP_Address,
-                Is_Success,
+                results.IP_Address,
+                results.Is_Success,
                 {FAILURE_TYPE_EXPR} AS reason,
-                date("Date") AS day,
+                date(results."Date") AS day,
                 ROW_NUMBER() OVER (
-                    PARTITION BY IP_Address, date("Date")
-                    ORDER BY datetime("Date") DESC
+                    PARTITION BY results.IP_Address, date(results."Date")
+                    ORDER BY datetime(results."Date") DESC
                 ) AS row_number
-            FROM tbl_Results
-            WHERE "Date" >= datetime((SELECT MAX("Date") FROM tbl_Results), '-30 days')
+            FROM tbl_Results AS results
+            JOIN current_target_ips AS target
+                ON target.IP_Address = results.IP_Address
+            WHERE results."Date" >= datetime((SELECT MAX("Date") FROM tbl_Results), '-30 days')
         )
         SELECT day, reason, COUNT(*) AS amount
         FROM ranked
@@ -347,6 +489,65 @@ def get_latest_failure_type_counts(limit, detail_alias="detail", amount_alias="a
         LIMIT ?;
         """,
         (limit,),
+    )
+
+
+def get_weekly_status_summary():
+    return query_one(
+        LAST_EXECUTION_CTE
+        + """
+        ,
+        last_execution_per_ip AS (
+            SELECT *
+            FROM (
+                SELECT
+                    last_execution.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY IP_Address
+                        ORDER BY datetime("Date") DESC, ID DESC
+                    ) AS row_number
+                FROM last_execution
+            )
+            WHERE row_number = 1
+        ),
+        failed_execution AS (
+            SELECT IP_Address, "Date"
+            FROM last_execution_per_ip
+            WHERE Is_Success = 0
+        ),
+        recent_success AS (
+            SELECT failed_execution.IP_Address
+            FROM failed_execution
+            JOIN tbl_Results AS results
+                ON results.IP_Address = failed_execution.IP_Address
+                AND results.Is_Success = 1
+                AND datetime(results."Date") >= datetime(failed_execution."Date", '-7 days')
+                AND datetime(results."Date") <= datetime(failed_execution."Date")
+            GROUP BY failed_execution.IP_Address
+        ),
+        weekly_status AS (
+            SELECT
+                last_execution_per_ip.IP_Address,
+                CASE
+                    WHEN last_execution_per_ip.Is_Success = 1 THEN 1
+                    WHEN recent_success.IP_Address IS NOT NULL THEN 1
+                    ELSE 0
+                END AS is_weekly_updated
+            FROM last_execution_per_ip
+            LEFT JOIN recent_success
+                ON recent_success.IP_Address = last_execution_per_ip.IP_Address
+        )
+        SELECT
+            COUNT(*) AS total_targets,
+            COALESCE(SUM(CASE WHEN is_weekly_updated = 1 THEN 1 ELSE 0 END), 0) AS updated_targets,
+            COALESCE(SUM(CASE WHEN is_weekly_updated = 0 THEN 1 ELSE 0 END), 0) AS not_updated_targets,
+            COALESCE(ROUND(
+                100.0 * SUM(CASE WHEN is_weekly_updated = 1 THEN 1 ELSE 0 END) /
+                NULLIF(COUNT(*), 0),
+                1
+            ), 0) AS updated_rate
+        FROM weekly_status;
+        """
     )
 
 
@@ -486,18 +687,24 @@ def render_rows(title, rows, description=None):
 
 def get_weekly_failure_reason_days():
     return query_all_with_fallback(
-        """
-        SELECT DISTINCT date("Date") AS day
-        FROM vew_LastMonthRun
-        WHERE "Date" IS NOT NULL
-            AND date("Date") >= date((SELECT MAX("Date") FROM vew_LastMonthRun), '-6 days')
+        CURRENT_TARGET_IPS_CTE
+        + """
+        SELECT DISTINCT date(results."Date") AS day
+        FROM vew_LastMonthRun AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address
+        WHERE results."Date" IS NOT NULL
+            AND date(results."Date") >= date((SELECT MAX("Date") FROM vew_LastMonthRun), '-6 days')
         ORDER BY day;
         """,
-        """
-        SELECT DISTINCT date("Date") AS day
-        FROM tbl_Results
-        WHERE "Date" IS NOT NULL
-            AND date("Date") >= date((SELECT MAX("Date") FROM tbl_Results), '-6 days')
+        CURRENT_TARGET_IPS_CTE
+        + """
+        SELECT DISTINCT date(results."Date") AS day
+        FROM tbl_Results AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address
+        WHERE results."Date" IS NOT NULL
+            AND date(results."Date") >= date((SELECT MAX("Date") FROM tbl_Results), '-6 days')
         ORDER BY day;
         """,
     )
@@ -505,20 +712,24 @@ def get_weekly_failure_reason_days():
 
 def get_weekly_failure_reason_summary_rows():
     return query_all_with_fallback(
-        """
-        WITH ranked AS (
+        CURRENT_TARGET_IPS_CTE
+        + """
+        ,
+        ranked AS (
             SELECT
-                IP_Address,
-                Is_Success,
+                results.IP_Address,
+                results.Is_Success,
                 COALESCE(NULLIF(TRIM(Details), ''), 'No details') AS reason,
-                date("Date") AS day,
+                date(results."Date") AS day,
                 ROW_NUMBER() OVER (
-                    PARTITION BY IP_Address, date("Date")
-                    ORDER BY datetime("Date") DESC
+                    PARTITION BY results.IP_Address, date(results."Date")
+                    ORDER BY datetime(results."Date") DESC
                 ) AS row_number
-            FROM vew_LastMonthRun
-            WHERE "Date" IS NOT NULL
-                AND date("Date") >= date((SELECT MAX("Date") FROM vew_LastMonthRun), '-6 days')
+            FROM vew_LastMonthRun AS results
+            JOIN current_target_ips AS target
+                ON target.IP_Address = results.IP_Address
+            WHERE results."Date" IS NOT NULL
+                AND date(results."Date") >= date((SELECT MAX("Date") FROM vew_LastMonthRun), '-6 days')
         )
         SELECT day, reason, COUNT(*) AS amount
         FROM ranked
@@ -526,20 +737,24 @@ def get_weekly_failure_reason_summary_rows():
         GROUP BY day, reason
         ORDER BY day, amount DESC, reason;
         """,
-        """
-        WITH ranked AS (
+        CURRENT_TARGET_IPS_CTE
+        + """
+        ,
+        ranked AS (
             SELECT
-                IP_Address,
-                Is_Success,
+                results.IP_Address,
+                results.Is_Success,
                 COALESCE(NULLIF(TRIM(Details), ''), 'No details') AS reason,
-                date("Date") AS day,
+                date(results."Date") AS day,
                 ROW_NUMBER() OVER (
-                    PARTITION BY IP_Address, date("Date")
-                    ORDER BY datetime("Date") DESC
+                    PARTITION BY results.IP_Address, date(results."Date")
+                    ORDER BY datetime(results."Date") DESC
                 ) AS row_number
-            FROM tbl_Results
-            WHERE "Date" IS NOT NULL
-                AND date("Date") >= date((SELECT MAX("Date") FROM tbl_Results), '-6 days')
+            FROM tbl_Results AS results
+            JOIN current_target_ips AS target
+                ON target.IP_Address = results.IP_Address
+            WHERE results."Date" IS NOT NULL
+                AND date(results."Date") >= date((SELECT MAX("Date") FROM tbl_Results), '-6 days')
         )
         SELECT day, reason, COUNT(*) AS amount
         FROM ranked
@@ -560,12 +775,9 @@ def build_weekly_failure_types_xlsx():
     chart_sheet = worksheet
     chart_sheet.title = "Weekly Report"
     list_sheet = workbook.create_sheet("Weekly Failure Types")
-    ip_graph_sheet = workbook.create_sheet("IP Errors Graph")
     ip_table_sheet = workbook.create_sheet("IP Errors Table")
     data_sheet = workbook.create_sheet("Chart Data")
     data_sheet.sheet_state = "hidden"
-    ip_chart_data_sheet = workbook.create_sheet("IP Error Chart Data")
-    ip_chart_data_sheet.sheet_state = "hidden"
 
     header_fill = PatternFill("solid", fgColor="315BE8")
     header_font = Font(color="FFFFFF", bold=True)
@@ -749,7 +961,7 @@ def build_weekly_failure_types_xlsx():
         chart_sheet.column_dimensions[get_column_letter(column_index)].width = 14
 
     ip_error_rows = list(get_ip_errors_since_success(ROW_LIMIT))
-    ip_chart_rows = ip_error_rows[:12]
+    ip_chart_row_count = min(12, len(ip_error_rows))
 
     ip_table_headers = ["IP", "Site", "Errors", "Last type", "Last success date"]
     for column_index, value in enumerate(ip_table_headers, start=1):
@@ -782,21 +994,7 @@ def build_weekly_failure_types_xlsx():
     if ip_error_rows:
         ip_table_sheet.auto_filter.ref = f"A1:E{ip_table_sheet.max_row}"
 
-    ip_chart_data_sheet.cell(row=1, column=1, value="IP")
-    ip_chart_data_sheet.cell(row=1, column=2, value="Errors")
-    for row_index, row in enumerate(ip_chart_rows, start=2):
-        ip_chart_data_sheet.cell(row=row_index, column=1, value=row["IP_Address"])
-        ip_chart_data_sheet.cell(row=row_index, column=2, value=row["Errors"] or 0)
-
-    ip_graph_sheet.merge_cells("A1:K1")
-    ip_graph_sheet["A1"] = "Most errors per IP since last success"
-    ip_graph_sheet["A1"].font = title_font
-    ip_graph_sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ip_graph_sheet.row_dimensions[1].height = 28
-    for column_index in range(1, 14):
-        ip_graph_sheet.column_dimensions[get_column_letter(column_index)].width = 14
-
-    if ip_chart_rows:
+    if ip_chart_row_count:
         def make_ip_bar_chart(width, height):
             ip_bar_chart = BarChart()
             ip_bar_chart.type = "col"
@@ -814,8 +1012,8 @@ def build_weekly_failure_types_xlsx():
             ip_bar_chart.graphical_properties = GraphicalProperties(
                 ln=LineProperties(solidFill="9E9E9E", w=8000)
             )
-            data = Reference(ip_chart_data_sheet, min_col=2, min_row=1, max_row=len(ip_chart_rows) + 1)
-            categories = Reference(ip_chart_data_sheet, min_col=1, min_row=2, max_row=len(ip_chart_rows) + 1)
+            data = Reference(ip_table_sheet, min_col=3, min_row=1, max_row=ip_chart_row_count + 1)
+            categories = Reference(ip_table_sheet, min_col=1, min_row=2, max_row=ip_chart_row_count + 1)
             ip_bar_chart.add_data(data, titles_from_data=True)
             ip_bar_chart.set_categories(categories)
             if ip_bar_chart.series:
@@ -823,10 +1021,9 @@ def build_weekly_failure_types_xlsx():
                 ip_bar_chart.series[0].graphicalProperties.line.solidFill = "5C78B2"
             return ip_bar_chart
 
-        ip_graph_sheet.add_chart(make_ip_bar_chart(18.8, 12), "A3")
         chart_sheet.add_chart(make_ip_bar_chart(21.0, 10.6), "J3")
     else:
-        ip_graph_sheet["A3"] = "No IP errors since last success found."
+        chart_sheet["J3"] = "No IP errors since last success found."
 
     output = BytesIO()
     workbook.save(output)
@@ -836,28 +1033,12 @@ def build_weekly_failure_types_xlsx():
 
 @app.route("/download_report")
 def download_report():
-    filename = f"weekly_report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.xlsx"
-    return Response(
-        build_weekly_failure_types_xlsx(),
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+    return cached_report_response()
 
 
 @app.route("/")
 def index():
-    cached_html = get_cached_dashboard_html()
-    if cached_html is not None:
-        return cached_html
-
-    with _dashboard_cache_lock:
-        cached_html = get_cached_dashboard_html()
-        if cached_html is not None:
-            return cached_html
-
-        html = build_dashboard_html()
-        set_cached_dashboard_html(html)
-        return html
+    return cached_html_response("/", build_dashboard_html)
 
 
 def build_dashboard_html():
@@ -865,12 +1046,13 @@ def build_dashboard_html():
     today_date = datetime.now().strftime("%Y-%m-%d")
 
     summary = query_one(
-        """
+        CURRENT_TARGET_IPS_CTE
+        + """
         SELECT
             COUNT(*) AS total_checks,
             COALESCE(SUM(CASE WHEN Is_Success = 1 THEN 1 ELSE 0 END), 0) AS success_checks,
             COALESCE(SUM(CASE WHEN Is_Success = 0 THEN 1 ELSE 0 END), 0) AS failed_checks,
-            COUNT(DISTINCT IP_Address) AS unique_ips,
+            COUNT(DISTINCT results.IP_Address) AS unique_ips,
             COALESCE(ROUND(
                 100.0 * SUM(CASE WHEN Is_Success = 1 THEN 1 ELSE 0 END) /
                 NULLIF(COUNT(*), 0),
@@ -878,25 +1060,13 @@ def build_dashboard_html():
             ), 0) AS success_rate,
             MIN("Date") AS first_seen,
             MAX("Date") AS last_seen
-        FROM tbl_Results;
+        FROM tbl_Results AS results
+        JOIN current_target_ips AS target
+            ON target.IP_Address = results.IP_Address;
         """
     )
 
-    target_summary = query_one(
-        LATEST_RUN_CTE
-        + """
-        SELECT
-            COUNT(*) AS total_targets,
-            COALESCE(SUM(CASE WHEN Is_Success = 1 THEN 1 ELSE 0 END), 0) AS healthy_targets,
-            COALESCE(SUM(CASE WHEN Is_Success = 0 THEN 1 ELSE 0 END), 0) AS failing_targets,
-            COALESCE(ROUND(
-                100.0 * SUM(CASE WHEN Is_Success = 1 THEN 1 ELSE 0 END) /
-                NULLIF(COUNT(*), 0),
-                1
-            ), 0) AS healthy_rate
-        FROM latest_run;
-        """
-    )
+    weekly_status_summary = get_weekly_status_summary()
 
     last_execution_summary = query_one(
         LAST_EXECUTION_CTE
@@ -980,7 +1150,7 @@ def build_dashboard_html():
         "index.html",
         db_size_label=db_size_label,
         summary=summary,
-        target_summary=target_summary,
+        weekly_status_summary=weekly_status_summary,
         last_run_card=last_run_card,
         today_date=today_date,
         last_success_card=last_success_card,
@@ -998,8 +1168,7 @@ def build_dashboard_html():
     )
 
 
-@app.route("/monthly_failure_types")
-def monthly_failure_types():
+def build_monthly_failure_types_html():
     rows = get_failure_reason_summary_rows()
     chart = get_failure_reason_chart(rows=rows)
     grouped_counts = group_counts_by_day(rows)
@@ -1011,13 +1180,17 @@ def monthly_failure_types():
     )
 
 
+@app.route("/monthly_failure_types")
+def monthly_failure_types():
+    return cached_html_response("/monthly_failure_types", build_monthly_failure_types_html)
+
+
 @app.route("/failure_reasons")
 def failure_reasons():
-    return monthly_failure_types()
+    return cached_html_response("/failure_reasons", build_monthly_failure_types_html)
 
 
-@app.route("/latest_failures")
-def latest_failures():
+def build_latest_failures_html():
     rows = query_all(
         LATEST_RUN_CTE
         + """
@@ -1032,20 +1205,32 @@ def latest_failures():
     return render_rows("Latest failures", rows, "Latest failed result rows.")
 
 
-@app.route("/incorrect_passwords")
-def incorrect_passwords():
+@app.route("/latest_failures")
+def latest_failures():
+    return cached_html_response("/latest_failures", build_latest_failures_html)
+
+
+def build_incorrect_passwords_html():
     rows = get_incorrect_password_rows(ROW_LIMIT)
     return render_rows("Incorrect password targets", rows, "Password errors from the latest run.")
 
 
-@app.route("/port_closed")
-def port_closed():
+@app.route("/incorrect_passwords")
+def incorrect_passwords():
+    return cached_html_response("/incorrect_passwords", build_incorrect_passwords_html)
+
+
+def build_port_closed_html():
     rows = get_port_closed_rows(ROW_LIMIT)
     return render_rows("Port closed targets", rows, "Latest targets with Port is closed failures.")
 
 
-@app.route("/latest_successes")
-def latest_successes():
+@app.route("/port_closed")
+def port_closed():
+    return cached_html_response("/port_closed", build_port_closed_html)
+
+
+def build_latest_successes_html():
     rows = query_all(
         LATEST_RUN_CTE
         + """
@@ -1060,8 +1245,12 @@ def latest_successes():
     return render_rows("Latest succeeded results", rows, "Latest succeeded result rows.")
 
 
-@app.route("/ip_errors_since_success")
-def ip_errors_since_success():
+@app.route("/latest_successes")
+def latest_successes():
+    return cached_html_response("/latest_successes", build_latest_successes_html)
+
+
+def build_ip_errors_since_success_html():
     rows = get_ip_errors_since_success(ROW_LIMIT)
     chart_rows = build_ip_error_distribution(rows)
     return render_template(
@@ -1075,8 +1264,12 @@ def ip_errors_since_success():
     )
 
 
-@app.route("/site_summary")
-def site_summary():
+@app.route("/ip_errors_since_success")
+def ip_errors_since_success():
+    return cached_html_response("/ip_errors_since_success", build_ip_errors_since_success_html)
+
+
+def build_site_summary_html():
     rows = query_all(
         LATEST_RUN_CTE
         + """
@@ -1098,6 +1291,11 @@ def site_summary():
         (ROW_LIMIT,),
     )
     return render_rows("Site coverage mapping", rows, "Grouped by site name from the latest run.")
+
+
+@app.route("/site_summary")
+def site_summary():
+    return cached_html_response("/site_summary", build_site_summary_html)
 
 
 @app.route("/search_ip")
@@ -1128,5 +1326,50 @@ def search_ip():
     return render_rows(f"Search: {search_text}", rows)
 
 
+PAGE_CACHE_SPECS = (
+    {"key": "/", "path": "/", "builder": build_dashboard_html, "type": "html"},
+    {
+        "key": "/monthly_failure_types",
+        "path": "/monthly_failure_types",
+        "builder": build_monthly_failure_types_html,
+        "type": "html",
+    },
+    {
+        "key": "/failure_reasons",
+        "path": "/failure_reasons",
+        "builder": build_monthly_failure_types_html,
+        "type": "html",
+    },
+    {
+        "key": "/latest_failures",
+        "path": "/latest_failures",
+        "builder": build_latest_failures_html,
+        "type": "html",
+    },
+    {
+        "key": "/incorrect_passwords",
+        "path": "/incorrect_passwords",
+        "builder": build_incorrect_passwords_html,
+        "type": "html",
+    },
+    {"key": "/port_closed", "path": "/port_closed", "builder": build_port_closed_html, "type": "html"},
+    {
+        "key": "/latest_successes",
+        "path": "/latest_successes",
+        "builder": build_latest_successes_html,
+        "type": "html",
+    },
+    {
+        "key": "/ip_errors_since_success",
+        "path": "/ip_errors_since_success",
+        "builder": build_ip_errors_since_success_html,
+        "type": "html",
+    },
+    {"key": "/site_summary", "path": "/site_summary", "builder": build_site_summary_html, "type": "html"},
+    {"key": "/download_report", "path": "/download_report", "builder": build_weekly_failure_types_xlsx, "type": "xlsx"},
+)
+
+
 if __name__ == "__main__":
+    start_page_cache_refresher()
     app.run(host="0.0.0.0", port=5000, debug=False)
