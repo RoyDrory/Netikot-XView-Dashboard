@@ -1,0 +1,33 @@
+# Databases / runtime data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+/data/
+Database/
+
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*service-account*.json
+*credentials*.json
+*token*.txt
+*.sha256
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editors / OS / scratch
+.idea/
+.vscode/
+*.log
+Untitled*
+Thumbs.db
+.DS_Store

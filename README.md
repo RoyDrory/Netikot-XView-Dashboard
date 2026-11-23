@@ -7,7 +7,8 @@ A lightweight Flask web dashboard for monitoring **Netikot / XView** connectivit
 ## Features
 
 - **Overview dashboard** – total checks, success rate, unique IPs, healthy vs. failing targets, and stats for the most recent execution run.
-- **Last-run detection** – groups results into runs automatically (a gap of 30+ minutes between results starts a new run).
+- **Weekly Status card** – shows the share of current targets that are "updated": their latest check succeeded, or they had a successful check within the 7 days before their latest failure.
+- **Last-run detection** – groups results into runs automatically (a gap of 30+ minutes between results starts a new run). The current target list is taken from the first run on the most recent day of data, so IPs that are no longer checked drop out of the stats.
 - **Failure analysis**
   - Top failure types from each IP's latest result
   - 30-day failure-type trend chart (one result per IP per day)
@@ -16,7 +17,7 @@ A lightweight Flask web dashboard for monitoring **Netikot / XView** connectivit
 - **Search** – look up any IP address, site name, or detail text across all results.
 - **Weekly Excel report** – one-click `.xlsx` download with a failure-type line chart, an IP errors bar chart, and supporting tables.
 - **Light / dark theme** – toggle saved in the browser.
-- **Fast and safe** – the database is opened in read-only, immutable mode, and the main dashboard is cached for 5 minutes.
+- **Fast and safe** – the database is opened in read-only, immutable mode, and every page plus the Excel report is pre-built and refreshed in the background every 10 minutes.
 
 ---
 
@@ -78,7 +79,7 @@ It must contain a table named `tbl_Results` with these columns:
 
 An optional view named **`vew_LastMonthRun`** is used for the monthly charts. If it doesn't exist, the app falls back to the last 30 days of `tbl_Results` automatically.
 
-> To use a different path, change `DB_PATH` at the top of `app.py`.
+> To use a different path, set the `NETIKOT_DB_PATH` environment variable (for example `-e NETIKOT_DB_PATH=/data/other.db`).
 
 ---
 
@@ -107,7 +108,7 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-# Make sure the database exists at /data/NetikotDB.db (or edit DB_PATH in app.py)
+# Make sure the database exists at /data/NetikotDB.db (or set NETIKOT_DB_PATH)
 python app.py
 ```
 
@@ -147,18 +148,20 @@ List pages show up to **500** rows (`ROW_LIMIT` in `app.py`).
 
 ## Configuration
 
-These constants at the top of `app.py` control behavior:
+These settings at the top of `app.py` control behavior:
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `DB_PATH` | `/data/NetikotDB.db` | Path to the SQLite database |
+| `DB_PATH` | `/data/NetikotDB.db` | Path to the SQLite database (override with the `NETIKOT_DB_PATH` env var) |
 | `ROW_LIMIT` | `500` | Maximum rows shown on list pages |
-| `DASHBOARD_CACHE_TTL_SECONDS` | `300` | How long the main dashboard is cached |
+| `PAGE_CACHE_REFRESH_SECONDS` | `600` | How often the background thread rebuilds all cached pages and the report |
 
 ---
 
 ## Notes
 
 - The dashboard never writes to the database; it's opened with `mode=ro&immutable=1`.
-- Because of the 5-minute cache, new results may take up to 5 minutes to appear on the main page. Other pages always query live data.
+- All pages (except search) and the Excel report are served from a cache that a background thread rebuilds every 10 minutes, so new results can take up to 10 minutes to appear. If a refresh fails, the previous pages stay in place. Search always queries live data.
+- Open pages reload themselves in the browser every 10 minutes.
+- The background refresher starts when the app is launched with `python app.py` (as the Docker image does).
 - The Docker container runs as a non-root user (`appuser`).

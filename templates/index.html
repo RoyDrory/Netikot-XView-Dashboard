@@ -75,24 +75,24 @@
     <article class="panel meter-panel">
         <div class="panel-header">
             <div>
-                <h2>Current Status</h2>
-                <p>Latest results</p>
+                <h2>Weekly Status</h2>
+                <p>Current weekly compliance status</p>
             </div>
             <span class="card-menu">...</span>
         </div>
 
         <div class="radial-wrap">
-            <div class="radial" style="--value: {{ target_summary.healthy_rate or 0 }}%;">
+            <div class="radial" style="--value: {{ weekly_status_summary.updated_rate or 0 }}%;">
                 <div>
-                    <strong>{{ "%.0f"|format(target_summary.healthy_rate or 0) }}%</strong>
-                    <span>healthy</span>
+                    <strong>{{ "%.0f"|format(weekly_status_summary.updated_rate or 0) }}%</strong>
+                    <span>updated</span>
                 </div>
             </div>
         </div>
 
         <dl class="legend-list">
-            <div><dt><i class="dot green"></i>Succeeded</dt><dd>{{ target_summary.healthy_targets or 0 }}</dd></div>
-            <div><dt><i class="dot red"></i>Failed</dt><dd>{{ target_summary.failing_targets or 0 }}</dd></div>
+            <div><dt><i class="dot green"></i>Updated</dt><dd>{{ weekly_status_summary.updated_targets or 0 }}</dd></div>
+            <div><dt><i class="dot red"></i>Outdated</dt><dd>{{ weekly_status_summary.not_updated_targets or 0 }}</dd></div>
         </dl>
     </article>
 
